@@ -4,24 +4,27 @@ import copy
 import json
 import kaolin as kal
 import kaolin.ops.mesh
+import numpy
 import numpy as np
 import os
 import random
 import torch
 import torch.nn as nn
 import torchvision
-
+import imageio
 from itertools import permutations, product
 from neural_highlighter import NeuralHighlighter
 from Normalization import MeshNormalizer
-from mesh import Mesh
+# from mesh import Mesh
 from pathlib import Path
 from render import Renderer
 from tqdm import tqdm
 from torch.autograd import grad
 from torchvision import transforms
 from utils import device, color_mesh
-
+import cv2
+from PIL import Image
+import matplotlib.pyplot as plt
 
 def optimize(agrs):
     # Constrain most sources of randomness
@@ -36,25 +39,17 @@ def optimize(agrs):
 
     # Load CLIP model 
     clip_model, preprocess = clip.load(args.clipmodel, device, jit=args.jit)
+    for parameter in clip_model.parameters():
+        parameter.requires_grad = False
 
-    # Adjust output resolution depending on model type 
-    res = 224 
-    if args.clipmodel == "ViT-L/14@336px":
-        res = 336
-    if args.clipmodel == "RN50x4":
-        res = 288
-    if args.clipmodel == "RN50x16":
-        res = 384
-    if args.clipmodel == "RN50x64":
-        res = 448
-
+    res = 224
     Path(os.path.join(args.output_dir, 'renders')).mkdir(parents=True, exist_ok=True)
 
-    objbase, extension = os.path.splitext(os.path.basename(args.obj_path))
-
-    render = Renderer(dim=(args.render_res, args.render_res))
-    mesh = Mesh(args.obj_path)
-    MeshNormalizer(mesh)()
+    # door_clipseg = torch.load('./data/door.pkl')
+    # door_clipseg[door_clipseg<0.5] = 0
+    # door_clipseg[door_clipseg>=0.5] = 1
+    # plt.imshow(door_clipseg.unsqueeze(dim=2))
+    # plt.show()
 
     # Initialize variables
     background = None
@@ -68,15 +63,9 @@ def optimize(agrs):
     with open(os.path.join(dir, 'commandline_args.txt'), 'w') as f:
         json.dump(args.__dict__, f, indent=2)
 
-    # CLIP and Augmentation Transforms
     clip_normalizer = transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711))
     clip_transform = transforms.Compose([
         transforms.Resize((res, res)),
-        clip_normalizer
-    ])
-    augment_transform = transforms.Compose([
-        transforms.RandomResizedCrop(res, scale=(1, 1)),
-        transforms.RandomPerspective(fill=1, p=0.8, distortion_scale=0.5),
         clip_normalizer
     ])
     
@@ -88,46 +77,88 @@ def optimize(agrs):
     # list of possible colors
     rgb_to_color = {(204/255, 1., 0.): "highlighter", (180/255, 180/255, 180/255): "gray"}
     color_to_rgb = {"highlighter": [204/255, 1., 0.], "gray": [180/255, 180/255, 180/255]}
-    full_colors = [[204/255, 1., 0.], [180/255, 180/255, 180/255]]
+    # full_colors = [[204/255, 1., 0.], [180/255, 180/255, 180/255]]
+    # full_colors = [[0, 1., 0.], [180 / 255, 180 / 255, 180 / 255]]
+    # full_colors = [[204 / 255, 1., 0.], [0, 0, 0]]
+    full_colors = [[0, 1., 0.], [0, 0, 0]]
     colors = torch.tensor(full_colors).to(device)
-    
+
     
     # --- Prompt ---
-    # pre-process multi_word_inputs
-    args.object[0] = ' '.join(args.object[0].split('_'))
-    for i in range(len(args.classes)):
-        args.classes[i] = ' '.join(args.classes[i].split('_'))
+
     # encode prompt with CLIP
-    prompt = "A 3D render of a gray {} with highlighted {}".format(args.object[0], args.classes[0])
+    # prompt = "A photo of a green statue with a black background".format(args.object[0], args.classes[0])
+    # prompt = "A photo of a statue over a black background"
+    # prompt = "A photo of a statue on a green screen"
+    prompt = "cathedral with a green portal"
+    save_dir = './results/0053/cathedral_with_a_green_portal'
+
     with torch.no_grad():
         prompt_token = clip.tokenize([prompt]).to(device)
         encoded_text = clip_model.encode_text(prompt_token)
         encoded_text = encoded_text / encoded_text.norm(dim=1, keepdim=True)
 
-    vertices = copy.deepcopy(mesh.vertices)
+    # image = preprocess(Image.open('./data/statue.jpg'))
+    image = preprocess(Image.open('./data/0053.jpg'))
+    image /= image.max()
+    image = image.to(device)
+
+    x = np.linspace(0, image.shape[1] - 1, image.shape[1]).astype(np.float32)
+    y = np.linspace(0, image.shape[2] - 1, image.shape[2]).astype(np.float32)
+    img_coord = []
+    for i in x:
+        for j in y:
+            coord1 = (i / (image.shape[1] - 1)).astype(np.float32)
+            coord2 = (j / (image.shape[2] - 1)).astype(np.float32)
+            img_coord.append([coord1, coord2])
+
+    img_coord = torch.tensor(img_coord).cuda()
+    # loss_cosine = nn.CosineEmbeddingLoss()
+    # loss_cosine = nn.CrossEntropyLoss()
+    # vertices = copy.deepcopy(mesh.vertices)
     losses = []
 
     # Optimization loop
-    for i in tqdm(range(args.n_iter)):
+    for iter in tqdm(range(args.n_iter)):
+
         optim.zero_grad()
 
-        # predict highlight probabilities
-        pred_class = mlp(vertices)
+        pred_class = mlp(img_coord)
 
-        # color and render mesh
-        sampled_mesh = mesh
-        color_mesh(pred_class, sampled_mesh, colors)
-        rendered_images, elev, azim = render.render_views(sampled_mesh, num_views=args.n_views,
-                                                                show=args.show,
-                                                                center_azim=args.frontview_center[0],
-                                                                center_elev=args.frontview_center[1],
-                                                                std=args.frontview_std,
-                                                                return_views=True,
-                                                                lighting=True,
-                                                                background=background)
+        pred_image = pred_class.reshape((image.shape[1], image.shape[2], 2))
+        pred_image = pred_image.cuda()
+        # rendered_image_channel = ((image[0,:,:]* 0.5 + pred_image*0.5))
+        # R_channel = rendered_image_channel.unsqueeze(dim=0)
+
+        # R_channel =  image[0, :, :].unsqueeze(dim=0)
+        # G_channel =  image[1, :, :].unsqueeze(dim=0)
+        # B_channel = image[2, :, :].unsqueeze(dim=0)
+        #
+        # rendered_image = torch.concat((R_channel, G_channel, B_channel), dim=0)
+        # pred_image[pred_image < 0.15] = 0
+        # pred_image[pred_image >= 0.5] = 1
+
+        # rendered_image = torch.multiply(pred_image[:,:,0], image)
+
+        # rendered_image = torch.zeros(3,224,224).to(device)
+        # for class_idx, color in enumerate(colors):
+        #     class_pred_image = pred_image[:, :, class_idx]
+        #     for c in range(3):
+        #         rendered_image[c, :, :] = (0.05 * image[c, :, :] + 0.95 * class_pred_image) * color[c]
+
+
+        alpha = 0.2
+        rendered_image = alpha * image + (1-alpha) * (pred_image @ colors).permute(2,0,1)
+
+        # rendered_image = (rendered_image.unsqueeze(dim=0) * 255).int()
+        rendered_image_unsqueezed = rendered_image.unsqueeze(dim=0)
 
         # Calculate CLIP Loss
-        loss = clip_loss(args, rendered_images, encoded_text, clip_transform, augment_transform, clip_model)
+
+        rendered_image_unsqueezed = clip_transform(rendered_image_unsqueezed)
+        encoded_renders = clip_model.encode_image(rendered_image_unsqueezed)
+        encoded_renders = encoded_renders / encoded_renders.norm(dim=1, keepdim=True)
+        loss = 1-torch.nn.functional.cosine_similarity(encoded_renders, encoded_text)
         loss.backward(retain_graph=True)
 
         optim.step()
@@ -135,87 +166,43 @@ def optimize(agrs):
         # update variables + record loss
         with torch.no_grad():
             losses.append(loss.item())
+            print(loss.item())
 
-        # report results
-        if i % 100 == 0:
-            print("Last 100 CLIP score: {}".format(np.mean(losses[-100:])))
-            save_renders(dir, i, rendered_images)
-            with open(os.path.join(dir, "training_info.txt"), "a") as f:
-                f.write(f"For iteration {i}... Prompt: {prompt}, Last 100 avg CLIP score: {np.mean(losses[-100:])}, CLIP score {losses[-1]}\n")
+            if (iter) % 1000 == 0:
+                save_results(image, rendered_image, pred_image, iter, save_dir, colors)
 
-    # re-initialize background color
-    if args.background is not None:
-        assert len(args.background) == 3
-        background = torch.tensor(args.background).to(device)
-    # save results
-    save_final_results(args, dir, mesh, mlp, vertices, colors, render, background)
 
-    # Save prompts
-    with open(os.path.join(dir, prompt), "w") as f:
-        f.write('')
+    save_results(image, rendered_image, pred_image, iter, save_dir, colors)
+
+
+
 
 
 
 # ================== HELPER FUNCTIONS =============================
-def save_final_results(args, dir, mesh, mlp, vertices, colors, render, background):
-    mlp.eval()
-    with torch.no_grad():
-        probs = mlp(vertices)
-        max_idx = torch.argmax(probs, 1, keepdim=True)
-        # for renders
-        one_hot = torch.zeros(probs.shape).to(device)
-        one_hot = one_hot.scatter_(1, max_idx, 1)
-        sampled_mesh = mesh
+def save_results(image, rendered_image, pred_image, i, save_dir, colors):
+    os.makedirs(save_dir, exist_ok=True)
 
-        highlight = torch.tensor([204, 255, 0]).to(device)
-        gray = torch.tensor([180, 180, 180]).to(device)
-        colors = torch.stack((highlight/255, gray/255)).to(device)
-        color_mesh(one_hot, sampled_mesh, colors)
-        rendered_images, _, _ = render.render_views(sampled_mesh, num_views=args.n_views,
-                                                                        show=args.show,
-                                                                        center_azim=args.frontview_center[0],
-                                                                        center_elev=args.frontview_center[1],
-                                                                        std=args.frontview_std,
-                                                                        return_views=True,
-                                                                        lighting=True,
-                                                                        background=background)
-        # for mesh
-        final_color = torch.zeros(vertices.shape[0], 3).to(device)
-        final_color = torch.where(max_idx==0, highlight, gray)
-        objbase, extension = os.path.splitext(os.path.basename(args.obj_path))
-        mesh.export(os.path.join(dir, f"{objbase}_{args.classes[0]}.ply"), extension="ply", color=final_color)
-        save_renders(dir, 0, rendered_images, name='final_render.jpg')
-        
+    if i == 0:
+        original_image = image.permute(1, 2, 0).cpu().detach().numpy()
+        imageio.imwrite(save_dir + '/original' + '.png', original_image)
 
-def clip_loss(args, rendered_images, encoded_text, clip_transform, augment_transform, clip_model):
-    if args.n_augs == 0:
-        clip_image = clip_transform(rendered_images)
-        encoded_renders = clip_model.encode_image(clip_image)
-        encoded_renders = encoded_renders / encoded_renders.norm(dim=1, keepdim=True)
-        if args.clipavg == "view":
-            if encoded_text.shape[0] > 1:
-                loss = torch.cosine_similarity(torch.mean(encoded_renders, dim=0),
-                                                torch.mean(encoded_text, dim=0), dim=0)
-            else:
-                loss = torch.cosine_similarity(torch.mean(encoded_renders, dim=0, keepdim=True),
-                                                encoded_text)
-        else:
-            loss = torch.mean(torch.cosine_similarity(encoded_renders, encoded_text))
-    elif args.n_augs > 0:
-        loss = 0.0
-        for _ in range(args.n_augs):
-            augmented_image = augment_transform(rendered_images)
-            encoded_renders = clip_model.encode_image(augmented_image)
-            if args.clipavg == "view":
-                if encoded_text.shape[0] > 1:
-                    loss -= torch.cosine_similarity(torch.mean(encoded_renders, dim=0),
-                                                    torch.mean(encoded_text, dim=0), dim=0)
-                else:
-                    loss -= torch.cosine_similarity(torch.mean(encoded_renders, dim=0, keepdim=True),
-                                                    encoded_text)
-            else:
-                loss -= torch.mean(torch.cosine_similarity(encoded_renders, encoded_text))
-    return loss
+    output_image = rendered_image.permute(1, 2, 0).cpu().detach().numpy()
+    imageio.imwrite(save_dir + '/output_' + str(i) + '.png', output_image)
+
+    pred_image_firstClass = pred_image[:,:,0].cpu().detach().numpy()
+    imageio.imwrite(save_dir + '/pred_firstClass_' + str(i) + '.png', pred_image_firstClass)
+
+    pred_image_firstClass_threshold = pred_image[:, :, 0]
+    pred_image_firstClass_threshold[pred_image_firstClass_threshold<0.5] = 0
+    pred_image_firstClass_threshold[pred_image_firstClass_threshold>0.5] = 1
+    pred_image_firstClass_threshold = pred_image_firstClass_threshold.cpu().detach()
+
+    image = image.cpu().detach()
+    alpha = 0.1
+    image_firstClass_threshold = alpha * image[0,:,:] + (1 - alpha) * pred_image_firstClass_threshold
+    pred_firstClass_Threshold = torch.concat((image_firstClass_threshold.unsqueeze(dim=2), image[1,:,:].unsqueeze(dim=2), image[2,:,:].unsqueeze(dim=2)),dim=2)
+    imageio.imwrite(save_dir + '/pred_firstClass_Threshold' + str(i) + '.png', pred_firstClass_Threshold)
 
 def save_renders(dir, i, rendered_images, name=None):
     if name is not None:
@@ -260,8 +247,8 @@ if __name__ == '__main__':
     parser.add_argument('--sigma', type=float, default=5.0)
 
     # optimization
-    parser.add_argument('--learning_rate', type=float, default=0.0001)
-    parser.add_argument('--n_iter', type=int, default=2500)
+    parser.add_argument('--learning_rate', type=float, default=0.00001)
+    parser.add_argument('--n_iter', type=int, default=5000)
 
     args = parser.parse_args()
 
