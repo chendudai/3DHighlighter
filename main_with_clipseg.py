@@ -41,14 +41,27 @@ def optimize(agrs):
     res = 224
     Path(os.path.join(args.output_dir, 'renders')).mkdir(parents=True, exist_ok=True)
 
-    door_clipseg = torch.load('./data/The_windows_of_the_cathedral.pklor.pkl')
+    door_clipseg = torch.load('/home/cc/students/csguests/chendudai/Thesis/repos/3DHighlighter/results/0732/statue.pkl')
     transform = T.Resize(size=(res, res))
     door_clipseg = transform(door_clipseg.unsqueeze(dim=0))
     # door_clipseg = torch.concat([door_clipseg, 1-door_clipseg],dim=0)
     door_clipseg[door_clipseg<0.5] = 0
     door_clipseg[door_clipseg>=0.5] = 1
-    # plt.imshow(door_clipseg.unsqueeze(dim=2))
-    # plt.show()
+    plt.imshow(door_clipseg.permute(1,2,0))
+
+
+    input_image = Image.open('/home/cc/students/csguests/chendudai/Thesis/data/0_1_undistorted/dense/images/0732.jpg')
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        transforms.Resize((224, 224)),
+    ])
+    img = transform(input_image).unsqueeze(0)
+    y = 0.8*door_clipseg + 0.2*img
+    plt.imshow(y.squeeze(dim=0).permute(1,2,0))
+
+
+    plt.show()
     door_clipseg = door_clipseg.to(device)
     # door_clipseg = door_clipseg.unsqueeze(dim=0)
 
@@ -96,11 +109,13 @@ def optimize(agrs):
         pred_class = mlp(img_coord)
 
         # Create Prediction Image
-        pred_image = torch.zeros(1,res, res)
-        for i in range(res):
-            for j in range(res):
-                pred_image[0,i,j] = pred_class[i*res + j,0] # + image[i,j,0]
+        # pred_image = torch.zeros(1,res, res)
+        # for i in range(res):
+        #     for j in range(res):
+        #         pred_image[0,i,j] = pred_class[i*res + j,0] # + image[i,j,0]
+        pred_image = pred_class.reshape((224,224,2))
 
+        pred_image = pred_image[:,:,0].unsqueeze(dim=0)
         pred_image = pred_image.cuda()
 
         loss = loss_func(door_clipseg, pred_image)
@@ -125,11 +140,26 @@ def optimize(agrs):
 
 # ================== HELPER FUNCTIONS =============================
 def save_results(rendered_image, i, mlp):
-    dir = './results/clipseg_train_door'
+    dir = './results/statue_0732/clipseg_train_statue_threshold=0.5'
     os.makedirs(dir, exist_ok=True)
     torch.save(rendered_image, dir + 'pred' + str(i) + '.pkl')
 
     plt.imshow(rendered_image.unsqueeze(dim=2).cpu().detach().numpy())
+
+    # input_image = Image.open('/home/cc/students/csguests/chendudai/Thesis/data/0_1_undistorted/images/0053.jpg')
+    # transform = transforms.Compose([
+    #     transforms.ToTensor(),
+    #     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    #     transforms.Resize((224, 224)),
+    # ])
+    # img = transform(input_image).unsqueeze(0)
+    # y = 0.8*rendered_image.unsqueeze(dim=0).cpu()+ 0.2*img
+    # plt.imshow(y.squeeze(dim=0).permute(1,2,0))
+    #
+
+
+
+
     plt.show()
     torch.save(mlp.state_dict(), dir + '/mlp_' + str(i) + '.pkl')
 
@@ -172,7 +202,7 @@ if __name__ == '__main__':
 
     # optimization
     parser.add_argument('--learning_rate', type=float, default=0.0001)
-    parser.add_argument('--n_iter', type=int, default=5000)
+    parser.add_argument('--n_iter', type=int, default=1000)
 
     args = parser.parse_args()
 

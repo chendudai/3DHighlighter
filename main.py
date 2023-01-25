@@ -25,6 +25,8 @@ from utils import device, color_mesh
 import cv2
 from PIL import Image
 import matplotlib.pyplot as plt
+def convert_image_to_rgb(image):
+    return image.convert("RGB")
 
 def optimize(agrs):
     # Constrain most sources of randomness
@@ -37,7 +39,7 @@ def optimize(agrs):
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
 
-    # Load CLIP model 
+    # Load CLIP model
     clip_model, preprocess = clip.load(args.clipmodel, device, jit=args.jit)
     for parameter in clip_model.parameters():
         parameter.requires_grad = False
@@ -66,9 +68,11 @@ def optimize(agrs):
     clip_normalizer = transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711))
     clip_transform = transforms.Compose([
         transforms.Resize((res, res)),
-        clip_normalizer
+        convert_image_to_rgb,
+        transforms.ToTensor(),
+        clip_normalizer,
     ])
-    
+
     # MLP Settings
     mlp = NeuralHighlighter(args.depth, args.width, out_dim=args.n_classes, positional_encoding=args.positional_encoding,
                             sigma=args.sigma).to(device)
@@ -81,17 +85,27 @@ def optimize(agrs):
     # full_colors = [[0, 1., 0.], [180 / 255, 180 / 255, 180 / 255]]
     # full_colors = [[204 / 255, 1., 0.], [0, 0, 0]]
     full_colors = [[0, 1., 0.], [0, 0, 0]]
+    # full_colors = [[0, 0., 1.], [0, 0, 0]]
+    # full_colors = [[1., 0., 0.], [0, 0, 0]]
+
     colors = torch.tensor(full_colors).to(device)
 
-    
+    finetune_clipseg_flag = True
+    if finetune_clipseg_flag:
+        checkpoint = torch.load("/home/cc/students/csguests/chendudai/Thesis/repos/3DHighlighter/results/statue_0732/clipseg_train_statue/mlp_999.pkl")
+        # checkpoint = torch.load("/home/cc/students/csguests/chendudai/Thesis/repos/3DHighlighter/results/statue_0732/clipseg_train_statue/mlp_999.pkl")
+        # checkpoint = torch.load("/home/cc/students/csguests/chendudai/Thesis/repos/3DHighlighter/results/clipseg_train_spires/mlp_999.pkl")
+        mlp.load_state_dict(checkpoint)
+
     # --- Prompt ---
 
     # encode prompt with CLIP
     # prompt = "A photo of a green statue with a black background".format(args.object[0], args.classes[0])
     # prompt = "A photo of a statue over a black background"
-    # prompt = "A photo of a statue on a green screen"
-    prompt = "cathedral with a green portal"
-    save_dir = './results/0053/cathedral_with_a_green_portal'
+    prompt = "A photo of a green statue"
+    # prompt = "cathedral with a green spires"
+    # prompt = "windows of a cathedral while the rest of the cathedral is dark"
+    save_dir = './results/0732/A_photo_of_a_green_statue_clipsegFinetune'
 
     with torch.no_grad():
         prompt_token = clip.tokenize([prompt]).to(device)
@@ -99,7 +113,7 @@ def optimize(agrs):
         encoded_text = encoded_text / encoded_text.norm(dim=1, keepdim=True)
 
     # image = preprocess(Image.open('./data/statue.jpg'))
-    image = preprocess(Image.open('./data/0053.jpg'))
+    image = clip_transform(Image.open('./data/0732.jpg'))
     image /= image.max()
     image = image.to(device)
 
@@ -149,13 +163,15 @@ def optimize(agrs):
 
         alpha = 0.2
         rendered_image = alpha * image + (1-alpha) * (pred_image @ colors).permute(2,0,1)
+        # p_fg = pred_image[:,:,0]
+        # rendered_image = p_fg * image
+        # rendered_image = p_fg * rendered_image
 
-        # rendered_image = (rendered_image.unsqueeze(dim=0) * 255).int()
         rendered_image_unsqueezed = rendered_image.unsqueeze(dim=0)
 
         # Calculate CLIP Loss
 
-        rendered_image_unsqueezed = clip_transform(rendered_image_unsqueezed)
+        # rendered_image_unsqueezed = clip_transform_2(rendered_image_unsqueezed)
         encoded_renders = clip_model.encode_image(rendered_image_unsqueezed)
         encoded_renders = encoded_renders / encoded_renders.norm(dim=1, keepdim=True)
         loss = 1-torch.nn.functional.cosine_similarity(encoded_renders, encoded_text)
